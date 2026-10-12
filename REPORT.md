@@ -87,7 +87,18 @@ Vì sao test `max_gap_ms` là `warn` còn `in_range` là `error`? Kết quả th
 ### Câu 4
 Dựa vào `idempotency.json`: số dòng trước và sau hai lần chạy lại, và khi ghi kiểu `append`. Vì sao Delta `overwrite` theo partition (một trip) an toàn hơn xoá rồi ghi lại, nhất là khi giữa chừng có lỗi?
 
-(trả lời ở đây)
+**1. Dựa vào `idempotency.json`:**
+- **Chạy lại với Delta Overwrite (chuẩn pipeline):**
+  + Trước khi chạy lại: 1246 dòng, mã vân tay (fingerprint) là `6c7480dfde7e`.
+  + Sau 2 lần chạy lại partition `trip-00003`: vẫn đúng **1246 dòng**, mã vân tay giữ nguyên `6c7480dfde7e` (**KHÔNG ĐỔI**).
+- **Mô phỏng kiểu ghi `append` sai lầm:**
+  + Đối với một trip có 60 khung hình, sau khi chạy lại 2 lần với chế độ append, số dòng tăng vọt lên **120 dòng** (**NHÂN ĐÔI - 2x**).
+
+**2. Vì sao Delta `overwrite` theo partition an toàn hơn xoá rồi ghi lại (`DELETE` then `INSERT`):**
+- **Tính nguyên tử (ACID Atomicity):** Delta Lake sử dụng cơ chế transaction log (`_delta_log`). Khi thực hiện `overwrite` theo phân vùng (`trip_id`), các tệp Parquet mới được ghi ra trước; chỉ khi quá trình ghi hoàn tất 100%, commit mới được tráo đổi nguyên tử (atomic commit).
+- **An toàn khi có sự cố sập giữa chừng:** Nếu hệ thống bị sập nguồn hoặc lỗi mạng giữa quá trình thực thi:
+  + Với `DELETE` rồi `INSERT`: Dữ liệu cũ đã bị xóa nhưng dữ liệu mới chưa kịp ghi xong, dẫn đến tình trạng mất dữ liệu vĩnh viễn hoặc bảng rơi vào trạng thái rỗng/nửa vời (partial state).
+  + Với Delta `overwrite`: Transaction sẽ tự động bị rollback/bỏ qua, partition cũ vẫn còn nguyên vẹn 100% ở phiên bản commit trước đó, đảm bảo tính toàn vẹn dữ liệu.
 
 ### Câu 5
 Khung hình **đen** và khung hình **tối** khác nhau thế nào, pipeline xử lý khác nhau ra sao, bạn có đồng ý không? Dựa vào `threshold.json`: nếu chọn ngưỡng 0, 2, 6 thì bao nhiêu khung bị coi là trùng ở mỗi drive? Bạn chọn ngưỡng nào, vì sao, và ngưỡng đó phụ thuộc vào tốc độ xe thế nào?
@@ -98,7 +109,27 @@ Khung hình **đen** và khung hình **tối** khác nhau thế nào, pipeline x
 | 2 | | |
 | 6 | | |
 
-(trả lời ở đây)
+**1. Khác biệt giữa khung hình đen và khung hình tối:**
+- **Khung hình đen (`den`):** Xuất hiện do lỗi phần cứng camera, nắp che ống kính hoặc mất tín hiệu video hoàn toàn (giá trị pixel xấp xỉ 0). Đây là khung hình rác, không mang thông tin thị giác nên **bị loại bỏ** khi chuyển lên tầng Gold.
+- **Khung hình tối (`toi_giu_lai`):** Xuất hiện khi xe đi vào môi trường thực tế thiếu sáng như đường hầm, bóng râm hay ban đêm (như ở drive B có tới 61 khung). Đây là **dữ liệu cạnh (edge case) rất giá trị** giúp mô hình AI học cách xử lý trong điều kiện ánh sáng yếu, do đó pipeline **gắn cờ nhận diện nhưng GIỮ LẠI**.
+- **Quan điểm:** Hoàn toàn đồng ý với cách xử lý này vì việc phân loại giúp làm sạch dữ liệu rác (đen) mà không làm mất đi các trường hợp biên quan trọng (tối) của bài toán xe tự lái.
+
+**2. Bảng khảo sát ngưỡng khung trùng dHash (từ `threshold.json`):**
+
+| dHash khác tối đa | số khung trùng, drive A | số khung trùng, drive B |
+|---|---|---|
+| 0 | 61 | 8 |
+| 2 | 149 | 53 |
+| 6 | 363 | 244 |
+
+**3. Lựa chọn ngưỡng và sự phụ thuộc vào tốc độ xe:**
+- **Chọn ngưỡng: t = 2 (ngưỡng hiện tại của pipeline):**
+  + Nếu chọn **t = 0 (quá khắt khe)**: Chỉ bắt được 61 khung ở A và 8 ở B. Khi xe dừng đèn đỏ, nhiễu hạt cảm biến camera hoặc độ rung xe vẫn làm sai lệch 1-2 bit dHash, dẫn đến bỏ sót các khung hình thực chất là trùng lặp.
+  + Nếu chọn **t = 6 (quá lỏng)**: Loại tới 363 khung ở A và 244 khung ở B (chiếm hơn 50% dữ liệu). Nhiều khung hình khi xe lăn bánh chậm hoặc đánh lái góc nhỏ sẽ bị nhận nhầm là trùng lặp và bị xóa oan, làm mất thông tin chuyển động liên tục.
+  + **Ngưỡng t = 2** là điểm cân bằng lý tưởng (sweet spot): vừa triệt tiêu được rung lắc/nhiễu hạt khi đứng yên, vừa giữ được sự thay đổi cảnh khi xe di chuyển.
+- **Sự phụ thuộc vào tốc độ xe:**
+  + Khi xe chạy nhanh: Bối cảnh cảnh quan thay đổi lớn sau mỗi 0.5s (2 fps), khoảng cách Hamming dHash giữa các frame liền kề rất lớn nên ít bị dính ngưỡng trùng.
+  + Khi xe chạy chậm hoặc dừng chờ đèn đỏ: Bối cảnh gần như đứng yên, dHash biến thiên rất nhỏ (0..2 bit). Ngưỡng dHash càng lớn thì số lượng khung bị loại ở các đoạn xe đi chậm càng nhiều.
 
 ## Bước 4 · Gold
 
