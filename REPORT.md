@@ -4,9 +4,9 @@
 
 | | |
 |---|---|
-| Họ và tên | `<điền>` |
-| MSSV (đúng bằng `LAB_STUDENT_ID` trong `.env`) | `<điền>` |
-| GitHub | `<điền: tên tài khoản>` |
+| Họ và tên | `Đỗ Hoàng Quân` |
+| MSSV (đúng bằng `2A202603016` trong `.env`) | `<điền>` |
+| GitHub | `The-Spirit-of-the-Beehive` |
 | Trip dùng cho bài tập sập và chạy lại (xem GUIDE, bước 5) | `<điền: trip-xxxxx>` |
 
 ## Kết quả cuối
@@ -21,7 +21,17 @@
 ### Câu 1
 Liệt kê **ít nhất 4 khác biệt** giữa telemetry nguồn A và nguồn B mà bạn thấy ở bronze. Vì sao pipeline giữ **mỗi nguồn một bảng bronze** và để mọi cột ở dạng chữ, thay vì gộp và ép kiểu ngay?
 
-(trả lời ở đây)
+**1. Các khác biệt giữa Telemetry A và Telemetry B quan sát được từ Bronze:**
+- **Thời gian (Timestamp):** Nguồn A dùng cột `ts_utc` định dạng chuỗi ISO-8601 UTC (ví dụ: `2025-10-07T08:00:00.014Z`), trong khi nguồn B dùng cột `timestamp_ms` dạng số nguyên epoch mili-giây (ví dụ: `1759933801509`).
+- **Tốc độ (Speed):** Nguồn A dùng cột `speed_mps` với đơn vị mét/giây (`m/s`), trong khi nguồn B dùng cột `spd_kmh` với đơn vị kilômét/giờ (`km/h`).
+- **Tọa độ GPS & Độ cao:** Nguồn A đặt tên cột rút gọn (`lat`, `lon`, `alt_m`), nguồn B đặt tên đầy đủ (`latitude`, `longitude`, `altitude`).
+- **Góc hướng & Gia tốc:** Nguồn A dùng `heading_deg`, `acc_x`, `acc_y`; nguồn B rút gọn thành `hdg`, `ax`, `ay`.
+- **Chân ga/phanh:** Nguồn A dùng `gas`, `brake` (giá trị chuẩn hóa thập phân, ví dụ `0.028`), nguồn B dùng `throttle_pct`, `brake_pct` (theo phần trăm, ví dụ `2.0`).
+- **Độ lệch đồng hồ:** Video `drive_b` có `telemetry_clock_offset_ms = 1500` ms (lệch 1.5 giây so với video), trong khi `drive_a` có offset bằng `0`.
+
+**2. Vì sao pipeline giữ mỗi nguồn một bảng Bronze và để mọi cột ở dạng chữ:**
+- **Mỗi nguồn một bảng riêng:** Do hai nguồn bị **Schema Drift** nghiêm trọng (khác tên cột, khác đơn vị đo, khác cấu trúc timestamp), việc ép chung vào một bảng ngay từ Bronze sẽ làm mất tính toàn vẹn hoặc sinh ra bảng chứa quá nhiều cột thưa (sparse columns) không nhất quán.
+- **Để mọi cột ở dạng chữ (string) và không ép kiểu ngay:** Đây là nguyên tắc **Raw Fidelity** của Medallion Architecture. Tầng Bronze có nhiệm vụ lưu giữ nguyên trạng 100% dữ liệu gốc để phục vụ audit/lineage. Nếu ép kiểu (cast sang float, timestamp) ngay tại Bronze, các ô rỗng, giá trị dị biệt hay dòng lỗi format sẽ làm crash quá trình ingest hoặc bị biến thành `NULL` âm thầm (silent data corruption). Việc làm sạch, ép kiểu và cách ly dòng lỗi vào bảng Quarantine sẽ được dời sang tầng Silver.
 
 ## Bước 2 · Silver telemetry
 
