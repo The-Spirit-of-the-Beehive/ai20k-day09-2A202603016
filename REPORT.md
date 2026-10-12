@@ -136,17 +136,42 @@ Khung hình **đen** và khung hình **tối** khác nhau thế nào, pipeline x
 ### Câu 6
 Dựa vào `leakage.json`: chia theo khung hình làm bao nhiêu trip bị chia cắt, so với chia theo trip? Vì sao điều này làm điểm kiểm thử đẹp một cách giả tạo?
 
-(trả lời ở đây)
+**1. Kết quả từ thí nghiệm `leakage.json`:**
+- **Chia theo khung hình (Random split 70/15/15):** Có tới **26/26 trip** (100%) bị chia cắt trên nhiều split khác nhau, và cả **26/26 trip** đều có khung hình xuất hiện đồng thời ở cả tập Train lẫn tập Test.
+- **Chia theo trip (Pipeline Gold):** Có đúng **0 trip** bị chia cắt. Mỗi chuyến đi (trip) nằm trọn vẹn trong một split duy nhất (18 trips tập Train, 4 trips tập Val, 4 trips tập Test).
+
+**2. Vì sao chia theo khung hình làm điểm kiểm thử đẹp một cách giả tạo:**
+- Video được trích xuất ở tần số 2 fps (cách nhau 0.5 giây mỗi khung hình). Hai khung hình liên tiếp $t$ và $t + 0.5s$ có góc nhìn, bối cảnh thời tiết, xe cộ xung quanh và cung đường gần như y hệt nhau.
+- Nếu chia ngẫu nhiên theo khung hình, tập Test sẽ chứa các khung hình chỉ lệch 0.5s so với khung hình trong tập Train. Lúc này mô hình AI không học khả năng tổng quát hóa (generalization) mà thực chất chỉ đang "học vẹt" bối cảnh đã thấy.
+- Kết quả là điểm kiểm thử (Loss/Accuracy) trên tập Test sẽ **cao và đẹp một cách giả tạo**, nhưng khi mang xe chạy trên một chuyến đi mới ngoài thực tế (unseen trip/road), mô hình sẽ dự đoán sai lệch hoàn toàn.
 
 ### Câu 7
 Vì sao `dataset_version` là **băm nội dung** chứ không phải ngày giờ hay số đếm? Hai lần chạy liên tiếp cho kết quả gì? Vì sao `dataset_version` của bạn **khác** bạn bè dù cùng dữ liệu (liên hệ MSSV)?
 
-(trả lời ở đây)
+**1. Vì sao `dataset_version` là băm nội dung (Content Hash):**
+- **Tính tái lập (Reproducibility) và tính bất biến:** Mã băm nội dung được tính toán trực tiếp từ danh sách frame ID, metadata, và split mapping. Nếu dùng ngày giờ hay số đếm tự tăng, mỗi lần chạy pipeline sẽ tạo một phiên bản mới dù dữ liệu không hề thay đổi, gây lãng phí bộ nhớ và mất dấu vết mô hình trong MLOps.
+- **Hai lần chạy liên tiếp:** Lệnh `export-dataset` chạy hai lần liên tiếp đều cho ra kết quả giống hệt nhau là `dataset_version: 3f528d97725d`, chứng minh tính bất biến (idempotent) và tính tất định (deterministic).
+
+**2. Vì sao `dataset_version` của tôi khác bạn bè:**
+- MSSV (`2A202603016`) được sử dụng làm giá trị hạt giống (seed) trong thuật toán băm để xáo trộn phân chia 26 trip vào các tập train/val/test.
+- Do mỗi sinh viên có MSSV khác nhau, danh sách các trip thuộc tập train, val, test sẽ khác nhau → số khung hình mỗi split khác nhau (Train: 721, Val: 124, Test: 174) → mã băm SHA-256 đại diện cho nội dung manifest của mỗi người là duy nhất.
 
 ### Câu 8
 Đọc phần `lineage` trong `manifest.json` của dataset bạn. Trả lời "dataset này được tạo từ dữ liệu nào?" bằng chính nội dung đó. Nếu một người hỏi 3 tháng sau, thông tin nào giúp tái tạo lại đúng dataset này?
 
-(trả lời ở đây)
+**1. Dataset này được tạo từ những dữ liệu nào (theo `manifest.json`):**
+- **Dữ liệu video gốc:** Tạo từ 2 tệp video với mã băm SHA-256 xác thực:
+  + `drive_a.mp4`: `636ba1a98dfc5ba665d1c935e1d2064e69f4df36`
+  + `drive_b.mp4`: `bfa62703f645ff77a8578ae3fc74a00881140d38`
+- **Phiên bản bảng nguồn (Upstream Delta tables):** Sử dụng các bảng tầng Silver ở phiên bản xác định: `silver.frames` (version 0), `silver.telemetry` (version 0), và `silver.trips` (version 0).
+- **Quy tắc làm sạch:** Loại bỏ hoàn toàn các khung hình có cờ lỗi (đen, mờ, đứng hình/trùng lặp theo ngưỡng dHash t=2, mất đồng bộ thời gian).
+- **Phân chia:** Gom cụm và phân bổ theo 26 `trip_id` dựa trên seed MSSV `2A202603016`.
+
+**2. Thông tin giúp tái tạo lại đúng dataset sau 3 tháng:**
+- Để tái tạo chính xác 100% dataset này trong tương lai mà không sai lệch dù chỉ 1 pixel, ta chỉ cần:
+  1. Hai tệp video nguồn có đúng mã băm SHA-256 ghi nhận trong lineage.
+  2. Truy vấn Time-travel về đúng số commit version của các bảng Delta Silver tương ứng (`version: 0`).
+  3. Cấu hình phân chia với đúng MSSV (`LAB_STUDENT_ID=2A202603016`).
 
 ## Bước 5 · Điều phối và phục vụ
 
