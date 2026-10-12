@@ -5,14 +5,14 @@
 | | |
 |---|---|
 | Họ và tên | `Đỗ Hoàng Quân` |
-| MSSV (đúng bằng `2A202603016` trong `.env`) | `<điền>` |
+| MSSV (đúng bằng `2A202603016` trong `.env`) | `2A202603016` |
 | GitHub | `The-Spirit-of-the-Beehive` |
-| Trip dùng cho bài tập sập và chạy lại (xem GUIDE, bước 5) | `<điền: trip-xxxxx>` |
+| Trip dùng cho bài tập sập và chạy lại (xem GUIDE, bước 5) | `trip-05905` |
 
 ## Kết quả cuối
 
-- `dataset_version` của bạn: `<điền>`  (phải khớp `report/evidence/run_summary.json`)
-- Số khung hình train / val / test của bạn: `<điền>`
+- `dataset_version` của bạn: `3f528d97725d`
+- Số khung hình train / val / test của bạn: `Train: 721, Val: 124, Test: 174 (Tổng: 1019)`
 - `report/verify.txt`: tạo bằng `python3 scripts/check_submission.py --save-verify` (phải có `27/27 checks passed`).
 - Ảnh chụp trong `report/screenshots/`: `airflow_graph.png`, `minio_lake.png`, `metabase_dashboard.png`, và ảnh bài tập sập/chạy lại (log task đỏ thấy trip của bạn).
 
@@ -178,21 +178,59 @@ Vì sao `dataset_version` là **băm nội dung** chứ không phải ngày gi�
 ### Câu 9
 Mô tả chính xác điều xảy ra khi trip của bạn sập rồi chạy lại: bao nhiêu task chuyển đỏ, bao nhiêu task `upstream_failed`, bạn clear gì, dữ liệu có nhân đôi không, `dataset_version` có đổi không? Bằng chứng (ảnh, số) là gì?
 
-(trả lời ở đây)
+**1. Mô tả chi tiết khi task bị sập:**
+- Khi thêm `LAB_FAIL_ONCE=trip-05905` vào `.env`, đúng **1 task con** trong mapped task `silver_frames` (cụ thể là task ứng với Map Index **16**, xử lý `trip-05905`) chuyển sang màu **đỏ (`failed`)**.
+- Ngay sau đó, toàn bộ **7 task downstream** phía sau (`dbt_run_silver`, `dbt_test_silver`, `dbt_run_gold`, `dbt_test_gold`, `publish_lake`, `export_dataset`, `publish_warehouse`) lập tức bị chặn lại và chuyển sang trạng thái **`upstream_failed`**.
+- Mở log của task đỏ thấy rõ exception: `RuntimeError: simulated crash while extracting trip-05905; run it again`.
+
+**2. Thao tác khắc phục và tính toàn vẹn dữ liệu:**
+- **Thao tác:** Tôi chỉ bấm nút **Clear** tại duy nhất task con Map Index 16 bị lỗi, không cần chạy lại toàn bộ DAG hay 25 task trích xuất khác. Task này sau đó chạy lại thành công (`success`) và kích hoạt 7 task downstream hoàn thành tiếp, đưa toàn bộ DAG về màu xanh lá cây.
+- **Dữ liệu có bị nhân đôi không:** **Hoàn toàn không**. Nhờ cơ chế Delta Lake `overwrite` theo partition (`trip_id = 'trip-05905'`), các khung hình trích xuất lại được ghi đè nguyên tử thay vì append, bảo toàn tính bất biến (idempotent).
+- **`dataset_version`:** Giữ nguyên tuyệt đối là **`3f528d97725d`**, không hề bị thay đổi hay sai lệch.
+- **Bằng chứng:** Ảnh log lỗi `fail_task_log.png` thấy rõ `trip-05905` bị crash và ảnh `airflow_graph.png` cho thấy DAG đã xanh hoàn toàn sau khi xử lý.
 
 ### Câu 10
 Nâng từ 2 drive lên **500 xe mỗi ngày**: ba thành phần nào của pipeline này sẽ vỡ đầu tiên, và bạn thay bằng gì (nối với slide 12, 22, 23)?
 
-(trả lời ở đây)
+Nếu quy mô nâng từ 2 chuyến lên **500 xe mỗi ngày** (khoảng 6.500 trips, hàng chục nghìn giờ video và hàng trăm Terabytes dữ liệu mỗi ngày), ba thành phần sau sẽ bị quá tải (vỡ) đầu tiên:
+
+1. **Bộ giải mã video và trích xuất Frame (FFmpeg tuần tự trên worker đơn lẻ của Airflow):**
+   - *Vấn đề:* Giải mã video (decoding) là tác vụ tốn CPU và I/O đĩa cực lớn (bottleneck lớn nhất theo slide 24). Một container đơn lẻ không thể xử lý nổi hàng ngàn video mỗi ngày.
+   - *Thay thế bằng:* Cụm tính toán phân tán (Distributed Computing) như **Apache Spark cluster** hoặc **Ray cluster** (slide 22, 23), cho phép phân phối việc decode video song song ra hàng trăm node worker độc lập.
+
+2. **Công cụ biến đổi DuckDB chạy in-process cục bộ:**
+   - *Vấn đề:* DuckDB xử lý dữ liệu in-memory trên một máy đơn rất nhanh, nhưng khi dữ liệu telemetry và frames vượt quá dung lượng RAM và đĩa của một máy chủ, DuckDB sẽ bị tràn bộ nhớ (OOM crash).
+   - *Thay thế bằng:* Query Engine phân tán quy mô lớn như **Trino / Databricks Spark SQL / Snowflake** kết hợp với **dbt-spark** hoặc **dbt-snowflake** (slide 12, 22).
+
+3. **Lưu trữ MinIO single-node và Data Warehouse PostgreSQL:**
+   - *Vấn đề:* MinIO và Postgres chạy trên một ổ đĩa cục bộ duy nhất sẽ nhanh chóng cạn kiệt dung lượng ổ cứng và nghẽn băng thông mạng khi lưu trữ hàng trăm TB video; Postgres cũng không được thiết kế để làm warehouse OLAP cho hàng tỷ dòng telemetry.
+   - *Thay thế bằng:* Object Storage đám mây thực thụ như **Amazon S3 / Google Cloud Storage** (không giới hạn dung lượng, băng thông mở rộng) và thay Postgres bằng Data Warehouse chuyên dụng cho OLAP như **ClickHouse / Google BigQuery / AWS Redshift** (slide 16).
 
 ## Câu hỏi riêng của bạn trên Metabase
 
 Câu SQL bạn thêm vào dashboard và điều nó cho biết:
 
-(trả lời ở đây)
+**Câu lệnh SQL thêm vào dashboard:**
+```sql
+SELECT 
+    lighting,
+    conditions,
+    COUNT(*) AS total_trips,
+    SUM(frames_kept) AS total_frames_kept,
+    ROUND(AVG(frames_kept::numeric / NULLIF(frames_total, 0) * 100), 1) AS keep_rate_pct
+FROM marts.mart_trips
+GROUP BY lighting, conditions
+ORDER BY keep_rate_pct ASC;
+```
+
+**Ý nghĩa và điều câu hỏi cho biết:**
+- Câu truy vấn này tính toán **tỷ lệ khung hình thực sự được giữ lại (`keep_rate_pct`)** sau các bước lọc chất lượng, phân nhóm theo từng điều kiện môi trường ánh sáng (`lighting`) và thời tiết (`conditions`).
+- Kết quả giúp đội ngũ Data Curation biết được điều kiện lái xe nào có tỷ lệ hao hụt dữ liệu cao nhất (ví dụ: các cảnh quay thiếu sáng qua đường hầm hay chói nắng bị loại nhiều khung mờ/đen hơn), từ đó lên kế hoạch thu thập bổ sung dữ liệu cho các trường hợp biên (edge cases) này.
 
 ## Nhìn lại
 
 Điều bạn thấy bất ngờ nhất, điều gì còn chưa rõ, và một lỗi dữ liệu mà bạn nghĩ pipeline **chưa** bắt được (nếu có). Tối đa 8 dòng.
 
-(trả lời ở đây)
+- **Điều bất ngờ nhất:** Thuật toán ghép nối theo event time (ASOF join) đồng bộ cực kỳ chính xác giữa video và telemetry (độ trễ trung bình chỉ ~66-73 ms) ngay cả khi hai nguồn cảm biến lệch tần số lấy mẫu và bị lệch đồng hồ 1.5 giây.
+- **Điều còn chưa rõ:** Cách cân bằng chi phí lưu trữ và băng thông truyền tải trên thực tế khi phải duy trì mã băm dHash và phiên bản hóa hàng tỷ frame ảnh trong các hệ thống Lakehouse lớn.
+- **Lỗi dữ liệu pipeline chưa bắt:** Hiện tượng **chói sáng đột ngột (Sun Glare / Overexposure)** khi xe đi từ hầm ra ngoài trời nắng gắt khiến camera bị mù trắng. Pipeline hiện tại mới chỉ bắt khung đen (`black`), tối (`dark`) và mờ (`laplacian blur`), chưa có cờ kiểm tra hiện tượng cháy sáng nghiêm trọng này.
