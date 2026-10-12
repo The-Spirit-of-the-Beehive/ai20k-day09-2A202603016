@@ -38,12 +38,49 @@ Liệt kê **ít nhất 4 khác biệt** giữa telemetry nguồn A và nguồn 
 ### Câu 2
 Pipeline đưa hai nguồn về một schema như thế nào (đơn vị, kiểu thời gian, **độ lệch đồng hồ**)? Bằng chứng nào trong kết quả bước 2 cho thấy đã đúng? Dán bảng quarantine của bạn (số dòng theo từng lý do, từng drive) và giải thích vì sao dòng lỗi vào `rejects` thay vì bị xoá.
 
-(trả lời ở đây)
+**1. Cách pipeline đưa hai nguồn về một schema:**
+- **Đồng bộ tên cột:** Chuyển các cột khác biệt của B về chuẩn chung: `spd_kmh` → `speed_mps`, `hdg` → `heading_deg`, `latitude`/`longitude` → `lat`/`lon`, `altitude` → `alt_m`.
+- **Chuẩn hóa đơn vị và kiểu thời gian:** Tốc độ của B được chia cho 3.6 (`spd_kmh / 3.6`) để chuyển từ km/h sang m/s; thời gian epoch `timestamp_ms` được parse sang định dạng timestamp UTC.
+- **Trừ độ lệch đồng hồ (Clock Offset):** Cột thời gian của `drive_b` được trừ đi 1500 ms (1.5 giây) theo đúng cấu hình khai báo trong `sources.json`.
+
+**2. Bằng chứng kết quả cho thấy đã đúng:**
+- Thời điểm bắt đầu của telemetry B sau khi trừ offset là `2025-10-08 14:30:00.009000+00:00`, trùng khớp hoàn toàn (lệch dưới 0.5s) với mốc bắt đầu của video `drive_b` (`14:30:00`).
+- Tốc độ tối đa sau khi lọc sạch là `71.0 km/h` (drive_a) và `100.0 km/h` (drive_b), đều nằm trong ngưỡng vật lý thực tế hợp lý (< 130 km/h).
+- Tổng số dòng sạch và dòng cách ly khớp chính xác 100% với dữ liệu thô ban đầu:
+  + Drive A: 2968 (sạch) + 53 (cách ly) = 3021 dòng thô.
+  + Drive B: 3181 (sạch) + 53 (cách ly) = 3234 dòng thô.
+
+**3. Bảng Quarantine (Dòng bị cách ly theo từng drive và lý do):**
+
+| drive_id | reject_reason | so_dong |
+|---|---|---|
+| drive_a | duplicate | 20 |
+| drive_a | speed_missing | 30 |
+| drive_a | speed_out_of_range | 3 |
+| drive_b | duplicate | 20 |
+| drive_b | speed_missing | 30 |
+| drive_b | speed_out_of_range | 3 |
+*(Tổng cộng có 106 dòng bị cách ly)*
+
+**4. Vì sao dòng lỗi vào `rejects` thay vì bị xoá:**
+- **Khả năng kiểm toán (Auditability) & Lineage:** Giữ lại toàn bộ dữ liệu lỗi kèm lý do giúp đội ngũ kỹ sư biết chính xác dữ liệu thất thoát ở đâu mà không gặp hiện tượng "mất dữ liệu âm thầm" (silent drop).
+- **Giám sát phần cứng cảm biến:** Theo dõi bảng `rejects` giúp phát hiện thiết bị trên xe bị lỗi (ví dụ: cảm biến tốc độ mất tín hiệu định kỳ hoặc bắn ra giá trị dị biệt 250 m/s ~ 900 km/h như thấy trong truy vấn CLI).
+- **Khả năng tái xử lý (Reprocessing):** Nếu sau này có thuật toán nội suy (interpolation) tốt hơn để khôi phục các dòng `speed_missing`, ta có thể chạy lại từ bảng `rejects` mà không cần thu thập lại dữ liệu gốc.
 
 ### Câu 3
 Vì sao test `max_gap_ms` là `warn` còn `in_range` là `error`? Kết quả thí nghiệm `break-gate` của bạn (`break_gate.json`): test nào bắt được, bao nhiêu dòng, và điều đó cho biết gì về vai trò của "cổng chất lượng"?
 
-(trả lời ở đây)
+**1. Vì sao `max_gap_ms` là `warn` còn `in_range` là `error`:**
+- **`max_gap_ms` đặt `warn`:** Trong thực tế vận hành xe tự lái, việc tín hiệu cảm biến bị ngắt quãng nhẹ (khi xe đi qua hầm, khuất bóng cây) là hiện tượng vật lý bình thường. Test này chỉ đóng vai trò cảnh báo chất lượng đường truyền (SLA), không phá vỡ cấu trúc dữ liệu downstream nên không được dừng toàn bộ pipeline.
+- **`in_range` đặt `error`:** Đây là quy chuẩn vật lý bắt buộc (tốc độ xe phải trong khoảng 0..70 m/s). Một giá trị vô lý như 250 m/s (~900 km/h) nếu lọt vào tầng Gold sẽ làm sai lệch nghiêm trọng trọng số mô hình AI hoặc gây nổ gradient trong quá trình huấn luyện. Do đó, đây là vi phạm chất lượng nghiêm trọng, bắt buộc cổng chất lượng phải chặn đứng pipeline (`ERROR`).
+
+**2. Kết quả thí nghiệm `break_gate.json`:**
+- Khi nới luật làm sạch tốc độ lên 1000 m/s, các giá trị dị biệt đã lọt vào tầng Silver và ngay lập tức bị Cổng chất lượng dbt bắt được: `PASS=5 WARN=1 ERROR=1 SKIP=0`.
+- Test chặn lỗi là `in_range_silver_telemetry_speed_mps__70__0`, bắt chính xác **6 dòng** vượt ngưỡng (3 dòng từ drive_a và 3 dòng từ drive_b).
+- Khi script khôi phục lại luật gốc, test trở lại trạng thái an toàn: `PASS=6 WARN=1 ERROR=0 SKIP=0`.
+
+**3. Vai trò của Cổng chất lượng (Quality Gate):**
+- Đóng vai trò như một "cầu dao tự động" (fail-safe circuit breaker), đảm bảo rằng dù mã nguồn làm sạch bị sửa sai hay có dữ liệu ngoại lai lọt qua lớp biến đổi, dữ liệu rác vẫn bị chặn đứng trước khi đi vào các tầng phân tích và huấn luyện downstream.
 
 ## Bước 3 · Silver frames
 
